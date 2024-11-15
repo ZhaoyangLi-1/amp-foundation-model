@@ -21,6 +21,8 @@ model:
   embedding_agg: 1
   peft_ckpt: ''
   stage1_ckpt: "STAGE1_CKPT"
+  alphafold_params: "/data1/zhaoyang/alphafold/params/params_model_1.npz"
+  alphafold_model_type": "model_1"
   
 datasets:
   seq:

@@ -11,9 +11,13 @@ from proteinchat.common.registry import registry
 from proteinchat.models.blip2 import Blip2Base, disabled_train
 from proteinchat.models.modeling_llama import LlamaForCausalLM
 from transformers import LlamaTokenizer
+import re
+
 
 from transformers import AutoTokenizer, EsmModel
-# from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
+from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
+from alphafold.model import data, model, config
+from alphafold.common import protein
 
 import time
 
@@ -29,6 +33,7 @@ class ProteinChat(Blip2Base):
     def __init__(
         self,
         freeze_protein_encoder=True,
+        freeze_str_encoder=True,
         freeze_lp=False,
         freeze_llama=True,
         llama_model="",
@@ -37,6 +42,8 @@ class ProteinChat(Blip2Base):
         end_sym='\n',
         low_resource=False,  # use 8 bit and put vit in cpu
         device_8bit=0,  # the device of 8bit model should be set when loading and cannot be changed anymore.
+        alphafold_params=None,
+        alphafold_model_type=None 
     ):
         super().__init__()
 
@@ -48,6 +55,13 @@ class ProteinChat(Blip2Base):
 
         self.protein_encoder, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
         self.protein_tokenizer = alphabet.get_batch_converter()
+        
+        self.str_encoder, self.str_alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
+
+        self.str_encoder = self.str_encoder.encoder
+        
+        alphafold_model_config = config.model_config(alphafold_model_type)
+        self.alphafold_runner = model.RunModel(alphafold_model_config, alphafold_params)
 
         if freeze_protein_encoder:
             for name, param in self.protein_encoder.named_parameters():
@@ -57,6 +71,16 @@ class ProteinChat(Blip2Base):
             logging.info("freeze protein encoder")
         else:
             self.protein_encoder = self.protein_encoder.train()
+            
+        if freeze_str_encoder:
+            for name, param in self.str_encoder.named_parameters():
+                param.requires_grad = False
+            self.str_encoder = self.str_encoder.eval()
+            self.str_encoder.train = disabled_train
+            logging.info("freeze str encoder")
+        else:
+            self.str_encoder = self.str_encoder.train()
+        
         
         print('Loading LLAMA')
         self.llama_tokenizer = LlamaTokenizer.from_pretrained(llama_model, use_fast=False)
@@ -82,7 +106,7 @@ class ProteinChat(Blip2Base):
             for name, param in self.llama_model.named_parameters():
                 param.requires_grad = False
         else:
-            lora_target_modules: List[str] = ["q_proj", "v_proj"]
+            lora_target_modules: list[str] = ["q_proj", "v_proj"]
             config = LoraConfig(
                 r=8,
                 lora_alpha=16,
@@ -97,12 +121,35 @@ class ProteinChat(Blip2Base):
         self.glm_llama_proj = nn.Linear(
             1280, self.llama_model.config.hidden_size
         )
+        self.str_llama_proj = nn.Linear(
+            1280, self.llama_model.config.hidden_size
+        )
         if freeze_lp:
             for name, param in self.glm_llama_proj.named_parameters():
                 param.requires_grad = False
         self.max_txt_len = max_txt_len
         self.end_sym = end_sym
+    
+    def encode_str(self, str_tokens):
+        coords, confidence, _, _, padding_mask = str_tokens
+        str_tokens = self.str_encoder(
+            coords=coords, confidence=confidence, encoder_padding_mask=padding_mask
+        )
+        str_tokens = str_tokens["encoder_out"][0]
+        str_tokens = str_tokens.permute([1, 0, 2])
 
+        if str_tokens.dtype != self.str_llama_proj.weight.dtype:
+            str_tokens = str_tokens.to(self.str_llama_proj.weight.dtype)
+
+        str_embeds = self.str_llama_proj(str_tokens)
+        atts_llama = torch.ones(str_embeds.size()[:-1], dtype=torch.long).to(str_embeds.device)
+        return str_embeds, atts_llama
+    
+    def reconstruct_protein(self, seqs):
+        result = self.alphafold_runner.predict(seqs)
+        protein_structure = protein.from_prediction(result)
+        return protein_structure
+        
     def encode_protein(self, seqs):
         batch_seqs = []
         for seq in seqs:
@@ -124,34 +171,69 @@ class ProteinChat(Blip2Base):
         #print(f'Size of atts_llama: {atts_llama.size()}')
         return inputs_llama, atts_llama
 
-    def prompt_list_wrap(self, img_embeds, atts_img, prompt):
+    def prompt_list_wrap(self, img_embeds, atts_img, str_embeds, atts_str, prompt):
         if prompt:
             p_before_lst = []
+            p_between_lst = []
             p_after_lst = []
             for p in prompt:
-                p_before, p_after = p.split('<proteinHere>')
+                # Split the prompt into parts based on '<proteinHere>' and '<structureHere>'
+                splits = re.split(r'(<proteinHere>|<structureHere>)', p)
+                if len(splits) == 5 and splits[1] == '<proteinHere>' and splits[3] == '<structureHere>':
+                    p_before = splits[0]
+                    p_between = splits[2]
+                    p_after = splits[4]
+                else:
+                    raise ValueError("Prompt format is incorrect. Expected format with '<proteinHere>' and '<structureHere>' placeholders.")
                 p_before_lst.append(p_before)
+                p_between_lst.append(p_between)
                 p_after_lst.append(p_after)
-            p_before_tokens_lst = self.llama_tokenizer(
-                p_before_lst, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
-
-            p_after_tokens_lst = self.llama_tokenizer(
-                p_after_lst, return_tensors="pt", add_special_tokens=True, padding=True).to(img_embeds.device)
-            
-            p_before_embeds = self.llama_model.model.embed_tokens(p_before_tokens_lst.input_ids)
-            p_after_embeds = self.llama_model.model.embed_tokens(p_after_tokens_lst.input_ids)
-            wrapped_img_embeds = torch.cat([p_before_embeds, img_embeds, p_after_embeds], dim=1)
-            wrapped_atts_img = atts_img[:, :1].expand(-1, wrapped_img_embeds.shape[1])
-            return wrapped_img_embeds, wrapped_atts_img
+            # Tokenize and embed the parts
+            p_before_tokens = self.llama_tokenizer(
+                p_before_lst, return_tensors="pt", add_special_tokens=False
+            ).to(img_embeds.device)
+            p_between_tokens = self.llama_tokenizer(
+                p_between_lst, return_tensors="pt", add_special_tokens=False
+            ).to(img_embeds.device)
+            p_after_tokens = self.llama_tokenizer(
+                p_after_lst, return_tensors="pt", add_special_tokens=True, padding=True
+            ).to(img_embeds.device)
+            # Get embeddings
+            p_before_embeds = self.llama_model.model.embed_tokens(p_before_tokens.input_ids)
+            p_between_embeds = self.llama_model.model.embed_tokens(p_between_tokens.input_ids)
+            p_after_embeds = self.llama_model.model.embed_tokens(p_after_tokens.input_ids)
+            # Now assemble the embeddings
+            wrapped_embeds = torch.cat(
+                [p_before_embeds, img_embeds, p_between_embeds, str_embeds, p_after_embeds], dim=1
+            )
+            # Adjust attention masks
+            wrapped_atts = torch.cat(
+                [
+                    p_before_tokens.attention_mask,
+                    atts_img,
+                    p_between_tokens.attention_mask,
+                    atts_str,
+                    p_after_tokens.attention_mask,
+                ],
+                dim=1,
+            )
+            return wrapped_embeds, wrapped_atts
         else:
-            return img_embeds, atts_img
+            # If no prompt, just concatenate img_embeds and str_embeds
+            wrapped_embeds = torch.cat([img_embeds, str_embeds], dim=1)
+            wrapped_atts = torch.cat([atts_img, atts_str], dim=1)
+            return wrapped_embeds, wrapped_atts
 
     def forward(self, samples):
-        seqs = samples["seq"] # list of seq
-        # print(samples)
-        protein_embeds, atts = self.encode_protein(seqs)
+        seqs = samples["seq"]  # List of sequences
+        str_tokens = self.reconstruct_protein(seqs)
+        str_embeds, atts_str = self.encode_str(str_tokens)
+        protein_embeds, atts_protein = self.encode_protein(seqs)
 
-        img_embeds, atts_img = self.prompt_list_wrap(protein_embeds, atts, samples["prompt"])
+        # Use the revised prompt_list_wrap function
+        img_embeds, atts_img = self.prompt_list_wrap(
+            protein_embeds, atts_protein, str_embeds, atts_str, samples["prompt"]
+        )
 
         self.llama_tokenizer.padding_side = "right"
 
@@ -163,29 +245,35 @@ class ProteinChat(Blip2Base):
             padding="longest",
             truncation=True,
             max_length=self.max_txt_len,
-            add_special_tokens=False
+            add_special_tokens=False,
         ).to(protein_embeds.device)
 
         targets = to_regress_tokens.input_ids.masked_fill(
             to_regress_tokens.input_ids == self.llama_tokenizer.pad_token_id, -100
         )
 
-        empty_targets = (
-            torch.ones([atts_img.shape[0], atts_img.shape[1]+1],
-                       dtype=torch.long).to(protein_embeds.device).fill_(-100)  # plus one for bos
-        )
+        empty_targets = torch.ones(
+            [atts_img.shape[0], atts_img.shape[1] + 1], dtype=torch.long
+        ).to(protein_embeds.device).fill_(-100)  # Plus one for BOS
         targets = torch.cat([empty_targets, targets], dim=1)
 
         batch_size = img_embeds.shape[0]
-        bos = torch.ones([batch_size, 1],
-                         dtype=to_regress_tokens.input_ids.dtype,
-                         device=to_regress_tokens.input_ids.device) * self.llama_tokenizer.bos_token_id
+        bos = (
+            torch.ones(
+                [batch_size, 1],
+                dtype=to_regress_tokens.input_ids.dtype,
+                device=to_regress_tokens.input_ids.device,
+            )
+            * self.llama_tokenizer.bos_token_id
+        )
         bos_embeds = self.llama_model.model.embed_tokens(bos)
         atts_bos = atts_img[:, :1]
 
         to_regress_embeds = self.llama_model.model.embed_tokens(to_regress_tokens.input_ids)
         inputs_embeds = torch.cat([bos_embeds, img_embeds, to_regress_embeds], dim=1)
-        attention_mask = torch.cat([atts_bos, atts_img, to_regress_tokens.attention_mask], dim=1)
+        attention_mask = torch.cat(
+            [atts_bos, atts_img, to_regress_tokens.attention_mask], dim=1
+        )
 
         with self.maybe_autocast():
             outputs = self.llama_model(
@@ -194,11 +282,6 @@ class ProteinChat(Blip2Base):
                 return_dict=True,
                 labels=targets,
             )
-        logits = outputs.logits
-        # print(torch.argmax(logits, dim=2).shape)
-        logits = torch.argmax(logits, dim=2)
-        #print(self.llama_tokenizer.batch_decode(logits, skip_special_tokens=True)[-400:])
-        #print("===========")
         loss = outputs.loss
         return {"loss": loss}
 
@@ -216,6 +299,8 @@ class ProteinChat(Blip2Base):
         max_txt_len = cfg.get("max_txt_len", 32)
         end_sym = cfg.get("end_sym", '\n')
         embedding_agg = cfg.get("embedding_agg", 1)
+        alphafold_params = cfg.get("alphafold_params", None)
+        alphafold_model_type = cfg.get("alphafold_model_type", None)
 
         model = cls(
             freeze_protein_encoder=freeze_protein_encoder,
@@ -227,6 +312,8 @@ class ProteinChat(Blip2Base):
             end_sym=end_sym,
             low_resource=low_resource,
             device_8bit=device_8bit,
+            alphafold_params=alphafold_params,
+            alphafold_model_type=alphafold_model_type
         )
 
         stage1_ckpt = cfg.get("stage1_ckpt", "")  # load weights of encoder and LP

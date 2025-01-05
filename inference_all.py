@@ -14,6 +14,7 @@ from proteinchat.common.config import Config
 from proteinchat.common.registry import registry
 from proteinchat.common.dist_utils import get_rank, init_distributed_mode
 from proteinchat.common.conversation import Chat, CONV_VISION
+from tqdm import tqdm
 
 from eval import get_simcse, get_simcse_llm_param
 import json
@@ -126,7 +127,7 @@ def eval_ppl():
     qa_list = json.load(open(f"/nfs_beijing_ai/mingjia_2023/proteinchat_glm/results-glm/10-glm-scratch-llama2-kw/params/ckpt3_beam4_joint_list.json"))
     loss_list = []
 
-    for item in qa_list:
+    for item in tqdm(qa_list, desc="Evaluating"):
         predict_list = item['predict_func']
 
         seq = item['seq']
@@ -143,10 +144,10 @@ def eval_ppl():
 
         item['loss'] = loss
         func_text.append(item)
-        print(predict_list)
-        print("loss", loss)
-        print('='*80)
-    with open("/nfs_beijing_ai/mingjia_2023/proteinchat_glm/results-glm/10-glm-scratch-llama2-kw/confidence/ckpt3_beam4_joint.json", "w") as outfile:
+        # print(predict_list)
+        # print("loss", loss)
+        # print('='*80)
+    with open("/home/zhaoyang/project/amp-foundation-model/ckpt3_beam4_joint.json", "w") as outfile:
         json.dump(func_text, outfile, indent=4)
     return func_text
 
@@ -183,16 +184,15 @@ def eval_antimicro():
         with open(f"/nfs_beijing_ai/mingjia_2023/data/antimicro/{split}_gen.json", "w") as outfile:
             json.dump(scores, outfile, indent=4)
     
-def eval_func_text(qa_list, seq):
+def eval_func_text(qa_list):
     start = time.time()
     func_text = []
     loss_list = []
-
     for item in qa_list:
 
-        function = item['caption']
-        uniprot_id = item['uniprot_id']
-        seq = seqs[uniprot_id]
+        function = item['function_text']
+        dramp_id = item['DRAMP_ID']
+        seq = item["sequence"]
         query = random.choice(questions)
 
         if len(seq) > 600:
@@ -208,7 +208,7 @@ def eval_func_text(qa_list, seq):
         entry = {"seq": seq, "query": query, "correct_func": function, "predict_func": llm_message}
         func_text.append(entry)
 
-        print("Uniprot ID:", uniprot_id)
+        print("DRAMP ID:", dramp_id)
         print("Loss:", loss)
         print("Correct Function:", function)
         print(f"Predicted Function: {llm_message}")
@@ -429,7 +429,6 @@ def tsne_multi_seq(prots):
     print(encoding_array.shape)
     np.save('tsne/protein.npy', encoding_array)
 
-
 if  __name__ == "__main__":
     directory_name = "results"
     if not os.path.exists(directory_name):
@@ -453,22 +452,10 @@ if  __name__ == "__main__":
 
     # eval func text & kw
     for data_dir in ['test']: #'train', 
-        seqs = json.load(open(f"data/{data_dir}_set/seq.json"))
-
-        for qa_file in ['manual', 'rule']:
-            print(data_dir, qa_file)
-
-            qa_list = json.load(open(f"data/{data_dir}_set/subset/qa_text_{qa_file}.json"))[:10]
-            func_text = eval_func_text(qa_list, seqs)
-            
-            simcse_path = "princeton-nlp/sup-simcse-roberta-large"
-            scores = get_simcse(simcse_path, func_text)
-
-            with open("results/esm.json", "a") as outfile:
-                json.dump(scores, outfile, indent=4)
-
-        qa_list = json.load(open(f"data/{data_dir}_set/subset/qa_kw.json"))[:10]
-        scores = eval_kw(qa_list, seqs)
+        qa_list = json.load(open(f"data/function_data_{data_dir}.json"))
+        func_text = eval_func_text(qa_list)
+        simcse_path = "princeton-nlp/sup-simcse-roberta-large"
+        scores = get_simcse(simcse_path, func_text)
         with open("results/esm.json", "a") as outfile:
             json.dump(scores, outfile, indent=4)
 

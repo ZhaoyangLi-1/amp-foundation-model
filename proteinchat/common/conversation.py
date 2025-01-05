@@ -107,8 +107,9 @@ class StoppingCriteriaSub(StoppingCriteria):
 
 
 CONV_VISION = Conversation(
-    system="Give the following protein: <protein>proteinContent</protein>. "
-           "Please answer my questions.",
+    # system="Give the following protein: <protein>proteinContent</protein>. "
+    #        "Please answer my questions.",
+    system = "",
     roles=("Human", "Assistant"),
     messages=[],
     offset=2,
@@ -198,7 +199,7 @@ class Chat:
             # only add bos to the first seg
             for i, seg in enumerate(predict_list)
         ]
-        predict_embs = [self.model.llama_model.model.embed_tokens(seg_t) for seg_t in predict_tokens]
+        predict_embs = [self.model.llama_embed_tokens(seg_t) for seg_t in predict_tokens]
 
         conf_list = []
         with torch.no_grad():
@@ -259,7 +260,7 @@ class Chat:
         #     print("seg_token", seg)
         #     print("seg_token", seg.shape)
         # print("=====")
-        seg_embs = [self.model.llama_model.model.embed_tokens(seg_t) for seg_t in seg_tokens]
+        seg_embs = [self.model.llama_embed_tokens(seg_t) for seg_t in seg_tokens]
         # for seg in seg_embs:
         #     print("seg_emb", seg.shape)
         # print("=====")
@@ -270,5 +271,3 @@ class Chat:
         mixed_embs = torch.cat(mixed_embs, dim=1)
         # print(mixed_embs.shape)
         return mixed_embs
-
-

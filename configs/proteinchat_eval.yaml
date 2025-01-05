@@ -3,10 +3,10 @@ model:
   model_type: pretrain_vicuna
   freeze_protein_encoder: True
   freeze_qformer: True
-  freeze_llama: True
+  freeze_llama: False
   freeze_lp: True
 
-  llama_model: "/data1/mingjia/vicuna-13b-v1.5"
+  llama_model: "/data2/zhaoyang/vicuna-weights"
   
   # generation configs
   prompt: ""
@@ -14,15 +14,15 @@ model:
   max_txt_len: 405
   end_sym: "###"
   low_resource: True
-  peft_ckpt: '' # stage-2 ckpt
-  stage1_ckpt: /data1/mingjia/protein/proteinchat_output/esm/20240702230/checkpoint_4.pth # stage-1 ckpt
+  peft_ckpt: "/data2/zhaoyang/protein/proteinchat_output/exp2-stage2-new/20241225035/checkpoint_19.pth" # stage-2 ckpt
+  stage1_ckpt: "/data2/zhaoyang/protein/proteinchat_output/exp2-stage1-new/20241224200/checkpoint_29.pth" # stage-1 ckpt
 
 datasets:
   seq:
     data_type: protein
     build_info:
       train:
-        storage: data/train_set
+        storage: data
 
 run:
   task: protein_text_pretrain
@@ -31,4 +31,3 @@ run:
   dist_url: "env://"
   distributed: True
   printable: True
-

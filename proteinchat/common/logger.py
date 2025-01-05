@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 
 from proteinchat.common import dist_utils
+from proteinchat.common.dist_utils import get_rank
 
 
 class SmoothedValue(object):

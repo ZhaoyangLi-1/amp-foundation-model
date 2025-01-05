@@ -31,10 +31,15 @@ from proteinchat.models import *
 from proteinchat.runners import *
 from proteinchat.tasks import *
 
+import warnings
+warnings.filterwarnings('ignore', message='Precision and F-score are ill-defined*')
+warnings.filterwarnings('ignore', message='Recall and F-score are ill-defined*')
+
+import wandb
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Training")
-    parser.add_argument("--cfg-path", default="configs/proteinchat_stage1.yaml", help="path to configuration file.")
+    parser.add_argument("--cfg-path", default="configs/proteinchat_stage2.yaml", help="path to configuration file.")
     parser.add_argument(
         "--options",
         nargs="+",
@@ -72,18 +77,27 @@ def main():
     cfg = Config(parse_args())
     init_distributed_mode(cfg.run_cfg)
     setup_seeds(cfg)
-    setup_logger()
+    cfg_dict = cfg.to_dict()
     cfg.pretty_print()
+    if get_rank() == 0:
+        setup_logger()
+        wandb_run_name = cfg_dict['run']['output_dir'].split('/')[-1]
+        wandb.init(project="proteinchat", config=cfg_dict, name=wandb_run_name, job_type="training")
 
     task = tasks.setup_task(cfg)
     datasets = task.build_datasets(cfg)
     model = task.build_model(cfg)
-
+    
+ 
+    
     runner = get_runner_class(cfg)(
         cfg=cfg, job_id=job_id, task=task, model=model, datasets=datasets
     )
-
+    if get_rank() == 0:
+        wandb.watch(model, log="all", log_freq=5000)
     runner.train()
+    if get_rank() == 0:
+        wandb.finish()
 
 
 if __name__ == "__main__":

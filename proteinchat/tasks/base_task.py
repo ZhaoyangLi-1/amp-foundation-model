@@ -14,6 +14,7 @@ from proteinchat.common.dist_utils import get_rank, get_world_size, is_main_proc
 from proteinchat.common.logger import MetricLogger, SmoothedValue
 from proteinchat.common.registry import registry
 from proteinchat.datasets.data_utils import prepare_sample
+import wandb
 
 
 class BaseTask:
@@ -290,6 +291,13 @@ class BaseTask:
             # print(f"[base_task] _train_inner_loop end_optimizer: {end_optimizer - end_train_step}")
             metric_logger.update(loss=loss.item())
             metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+            if get_rank() == 0:
+                wandb.log({
+                    "loss": loss.item(),
+                    "learning_rate": optimizer.param_groups[0]["lr"],
+                    "epoch": epoch,
+                    "iteration": i
+                })
             # print(f"[base_task] _train_inner_loop ITERATION end -----------------------------{time.time()-iter_start}")
 
         # after train_epoch()
